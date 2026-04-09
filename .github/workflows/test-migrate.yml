@@ -40,43 +40,37 @@ jobs:
       - name: Install hermes in editable mode
         run: |
           uv venv .venv
-          . .venv/bin/activate
           uv pip install -e ".[all,dev]"
 
       - name: Run migrate-specific unit tests
         id: test
         run: |
-          . .venv/bin/activate
-          python -m pytest tests/test_migrate_workflow/ -v --tb=short 2>&1
+          uv run python -m pytest tests/test_migrate_workflow/ -v --tb=short 2>&1
 
       - name: Run migrate export (integration smoke test)
         run: |
-          . .venv/bin/activate
           # Create minimal config.yaml so the bundle includes it (safe preset wants it)
           echo "model: test" > "$GITHUB_WORKSPACE/config.yaml"
-          hermes migrate export --output /tmp/smoke-bundle.tar.gz 2>&1
+          uv run hermes migrate export --output /tmp/smoke-bundle.tar.gz 2>&1
           ls -lh /tmp/smoke-bundle.tar.gz
         env:
           HERMES_HOME: ${{ github.workspace }}
 
       - name: Run migrate verify on bundle
         run: |
-          . .venv/bin/activate
-          hermes migrate verify --input /tmp/smoke-bundle.tar.gz 2>&1
+          uv run hermes migrate verify --input /tmp/smoke-bundle.tar.gz 2>&1
         env:
           HERMES_HOME: ${{ github.workspace }}
 
       - name: Run migrate import dry-run
         run: |
-          . .venv/bin/activate
-          hermes migrate import --input /tmp/smoke-bundle.tar.gz --dry-run 2>&1
+          uv run hermes migrate import --input /tmp/smoke-bundle.tar.gz --dry-run 2>&1
         env:
           HERMES_HOME: ${{ github.workspace }}
 
       - name: Run migrate doctor
         run: |
-          . .venv/bin/activate
-          hermes migrate doctor 2>&1
+          uv run hermes migrate doctor 2>&1
 
       - name: Upload test logs on failure
         if: failure() && steps.test.outcome == 'failure'
