@@ -53,26 +53,23 @@ jobs:
         run: |
           # Create minimal config.yaml so the bundle includes it (safe preset wants it)
           echo "model: test" > "$GITHUB_WORKSPACE/config.yaml"
-          uv run hermes migrate export --output "$SMOKE_BUNDLE" 2>&1
+          uv run hermes migrate export --output "${{ runner.temp }}/smoke-bundle.tar.gz" 2>&1
         env:
           HERMES_HOME: ${{ github.workspace }}
-          SMOKE_BUNDLE: ${{ runner.temp }}/smoke-bundle.tar.gz
           PYTHONIOENCODING: utf-8
 
       - name: Run migrate verify on bundle
         run: |
-          uv run hermes migrate verify --input "$SMOKE_BUNDLE" 2>&1
+          uv run hermes migrate verify --input "${{ runner.temp }}/smoke-bundle.tar.gz" 2>&1
         env:
           HERMES_HOME: ${{ github.workspace }}
-          SMOKE_BUNDLE: ${{ runner.temp }}/smoke-bundle.tar.gz
           PYTHONIOENCODING: utf-8
 
       - name: Run migrate import dry-run
         run: |
-          uv run hermes migrate import --input "$SMOKE_BUNDLE" --dry-run 2>&1
+          uv run hermes migrate import --input "${{ runner.temp }}/smoke-bundle.tar.gz" --dry-run 2>&1
         env:
           HERMES_HOME: ${{ github.workspace }}
-          SMOKE_BUNDLE: ${{ runner.temp }}/smoke-bundle.tar.gz
           PYTHONIOENCODING: utf-8
 
       - name: Run migrate doctor
