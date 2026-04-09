@@ -52,7 +52,6 @@ jobs:
           # Create minimal config.yaml so the bundle includes it (safe preset wants it)
           echo "model: test" > "$GITHUB_WORKSPACE/config.yaml"
           uv run hermes migrate export --output /tmp/smoke-bundle.tar.gz 2>&1
-          ls -lh /tmp/smoke-bundle.tar.gz
         env:
           HERMES_HOME: ${{ github.workspace }}
 
