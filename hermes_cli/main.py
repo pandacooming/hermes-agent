@@ -41,6 +41,9 @@ Usage:
     hermes sessions browse     Interactive session picker with search
 
     hermes claw migrate --dry-run  # Preview migration without changes
+    hermes migrate export           # Unified cross-machine migration
+    hermes migrate import -i ...    # Import from migration bundle
+    hermes migrate doctor           # Check migration readiness
 """
 
 import argparse
@@ -4148,6 +4151,12 @@ def cmd_profile(args):
             sys.exit(1)
 
 
+def cmd_migrate(args):
+    """Unified migration command — export, import, verify, doctor."""
+    from hermes_cli import migrate as migrate_module
+    migrate_module.run_migrate(args)
+
+
 def cmd_completion(args):
     """Print shell completion script."""
     from hermes_cli.profiles import generate_bash_completion, generate_zsh_completion
@@ -5521,6 +5530,78 @@ For more help on a command:
                                 help="Profile name (default: inferred from archive)")
 
     profile_parser.set_defaults(func=cmd_profile)
+
+    # =========================================================================
+    # migrate command
+    # =========================================================================
+    migrate_parser = subparsers.add_parser(
+        "migrate",
+        help="Unified migration — export, import, verify, and doctor",
+        description="Migrate Hermes between machines (Linux, macOS, WSL2) with automatic path remapping",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+Examples:
+    hermes migrate export                    Export current Hermes to bundle
+    hermes migrate export --preset full     Include secrets (.env, auth.json)
+    hermes migrate export -o backup.tar.gz  Custom output path
+    hermes migrate import -i backup.tar.gz   Import from bundle
+    hermes migrate import -i backup.tar.gz --dry-run   Preview without applying
+    hermes migrate import -i backup.tar.gz --interactive  Guided import with prompts
+    hermes migrate verify -i backup.tar.gz  Verify bundle integrity
+    hermes migrate verify                   Verify current installation
+    hermes migrate doctor                   Check environment for migration
+""",
+    )
+    migrate_subparsers = migrate_parser.add_subparsers(dest="action", help="Migration action")
+
+    # migrate export
+    migrate_export = migrate_subparsers.add_parser("export", help="Export Hermes to migration bundle")
+    migrate_export.add_argument(
+        "--preset", "-p",
+        choices=["safe", "full"],
+        default="safe",
+        help="Preset: 'safe' excludes secrets (default), 'full' includes them"
+    )
+    migrate_export.add_argument(
+        "--output", "-o",
+        help="Output .tar.gz path (default: hermes-migration-{timestamp}.tar.gz)"
+    )
+
+    # migrate import
+    migrate_import = migrate_subparsers.add_parser("import", help="Import from migration bundle")
+    migrate_import.add_argument(
+        "--input", "-i",
+        required=True,
+        help="Input .tar.gz bundle path"
+    )
+    migrate_import.add_argument(
+        "--preset", "-p",
+        choices=["safe", "full"],
+        default="safe",
+        help="Preset used during export (default: safe)"
+    )
+    migrate_import.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be imported without applying"
+    )
+    migrate_import.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Run guided interactive import with step-by-step prompts"
+    )
+
+    # migrate verify
+    migrate_verify = migrate_subparsers.add_parser("verify", help="Verify bundle or installation")
+    migrate_verify.add_argument(
+        "--input", "-i",
+        help="Bundle to verify (if omitted, verifies current installation)"
+    )
+
+    # migrate doctor
+    migrate_subparsers.add_parser("doctor", help="Check environment health")
+
+    migrate_parser.set_defaults(func=cmd_migrate)
 
     # =========================================================================
     # completion command
