@@ -51,7 +51,7 @@ jobs:
 
       - name: Create config.yaml for smoke test
         run: |
-          uv run python -c "import pathlib; (pathlib.Path(os.environ['HERMES_HOME']) / 'config.yaml').write_text('model: test\n', encoding='utf-8')"
+          uv run python -c "import pathlib, os; (pathlib.Path(os.environ['HERMES_HOME']) / 'config.yaml').write_text('model: test\n', encoding='utf-8')"
         env:
           HERMES_HOME: ${{ github.workspace }}
           PYTHONIOENCODING: utf-8
