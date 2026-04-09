@@ -82,7 +82,7 @@ class TestMaxTurnsResolution:
     def test_max_turns_never_none_for_agent(self):
         """The value passed to AIAgent must never be None (causes TypeError in run_conversation)."""
         cli = _make_cli()
-        assert isinstance(cli.max_turns, int) and cli.max_turns == 90
+        assert isinstance(cli.max_turns, int) and cli.max_turns == 300
 
 
 class TestVerboseAndToolProgress:
