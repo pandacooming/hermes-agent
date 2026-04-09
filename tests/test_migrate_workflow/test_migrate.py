@@ -103,9 +103,14 @@ def _PROFILES_STUB_FN(archive_path, dest_dir):
 # Tests — Platform detection
 # ---------------------------------------------------------------------------
 
-def test_detect_platform_returns_linux_on_linux(migrate_module):
+def test_detect_platform_returns_current_os(migrate_module):
+    """detect_platform() returns the current OS name."""
+    import platform
+    expected_os = {"Darwin": "macos", "Linux": "linux", "Windows": "windows"}.get(
+        platform.system(), "linux"
+    )
     p = migrate_module.detect_platform()
-    assert p["os"] in ("linux", "wsl")
+    assert p["os"] == expected_os
     assert isinstance(p["home"], Path)
 
 

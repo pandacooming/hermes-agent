@@ -46,30 +46,30 @@ jobs:
       - name: Run migrate-specific unit tests
         id: test
         run: |
-          source .venv/bin/activate
+          . .venv/bin/activate
           python -m pytest tests/test_migrate_workflow/ -v --tb=short 2>&1
         env:
-          HERMES_HOME: /tmp/hermes-test-home
+          HERMES_HOME: ${{ github.workspace }}
 
       - name: Run migrate export (integration smoke test)
         run: |
-          source .venv/bin/activate
+          . .venv/bin/activate
           hermes migrate export --output /tmp/smoke-bundle.tar.gz 2>&1
           ls -lh /tmp/smoke-bundle.tar.gz
 
       - name: Run migrate verify on bundle
         run: |
-          source .venv/bin/activate
+          . .venv/bin/activate
           hermes migrate verify --input /tmp/smoke-bundle.tar.gz 2>&1
 
       - name: Run migrate import dry-run
         run: |
-          source .venv/bin/activate
+          . .venv/bin/activate
           hermes migrate import --input /tmp/smoke-bundle.tar.gz --dry-run 2>&1
 
       - name: Run migrate doctor
         run: |
-          source .venv/bin/activate
+          . .venv/bin/activate
           hermes migrate doctor 2>&1
 
       - name: Upload test logs on failure
