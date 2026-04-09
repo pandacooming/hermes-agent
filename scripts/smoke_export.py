@@ -14,6 +14,11 @@ import os
 
 def main():
     hermes_home = pathlib.Path(os.environ["HERMES_HOME"])
+    # Determine script's own directory based on known repo structure:
+    # scripts/smoke_export.py is at <repo>/scripts/smoke_export.py
+    # HERMES_HOME = <repo>, so script_path = HERMES_HOME / "scripts" / "smoke_export.py"
+    script_path = hermes_home / "scripts" / "smoke_export.py"
+
     config = hermes_home / "config.yaml"
     config.write_text("model: test\n", encoding="utf-8")
 
@@ -21,6 +26,7 @@ def main():
     result = subprocess.run(
         [sys.executable, "-m", "hermes", "migrate", "export", "--output", str(bundle)],
         check=False,
+        cwd=str(hermes_home),
     )
     if result.returncode != 0:
         print(result.stdout.decode("utf-8", errors="replace"))
