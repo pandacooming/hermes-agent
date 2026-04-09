@@ -50,15 +50,7 @@ jobs:
           PYTHONIOENCODING: utf-8
 
       - name: Run migrate export (integration smoke test)
-        run: |
-          python -c "
-import pathlib, subprocess, sys, os, tempfile
-hermes_home = pathlib.Path(os.environ['HERMES_HOME'])
-config = hermes_home / 'config.yaml'
-config.write_text('model: test\n', encoding='utf-8')
-bundle = hermes_home / 'smoke-bundle.tar.gz'
-subprocess.run([sys.executable, '-m', 'hermes', 'migrate', 'export', '--output', str(bundle)], check=True)
-"
+        run: uv run python "$GITHUB_WORKSPACE/scripts/smoke_export.py"
         env:
           HERMES_HOME: ${{ github.workspace }}
           PYTHONIOENCODING: utf-8
