@@ -40,7 +40,7 @@ jobs:
       - name: Install hermes in editable mode
         run: |
           uv venv .venv
-          source .venv/bin/activate
+          . .venv/bin/activate
           uv pip install -e ".[all,dev]"
 
       - name: Run migrate-specific unit tests
@@ -54,6 +54,9 @@ jobs:
       - name: Run migrate export (integration smoke test)
         run: |
           . .venv/bin/activate
+          # Create minimal config.yaml so the bundle includes it (safe preset wants it)
+          mkdir -p "$HERMES_HOME"
+          echo "model: test" > "$HERMES_HOME/config.yaml"
           hermes migrate export --output /tmp/smoke-bundle.tar.gz 2>&1
           ls -lh /tmp/smoke-bundle.tar.gz
 
