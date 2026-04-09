@@ -1,0 +1,83 @@
+name: Test Migrate Command
+
+on:
+  push:
+    branches: [feature/unified-migration]
+  pull_request:
+    branches: [feature/unified-migration]
+
+# Cancel in-progress runs for the same PR/branch
+concurrency:
+  group: migrate-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-migrate:
+    name: Test migrate on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.11"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install hermes in editable mode
+        run: |
+          uv venv .venv
+          source .venv/bin/activate
+          uv pip install -e ".[all,dev]"
+
+      - name: Run migrate-specific unit tests
+        id: test
+        run: |
+          source .venv/bin/activate
+          python -m pytest tests/test_migrate_workflow/ -v --tb=short 2>&1
+        env:
+          HERMES_HOME: /tmp/hermes-test-home
+
+      - name: Run migrate export (integration smoke test)
+        run: |
+          source .venv/bin/activate
+          hermes migrate export --output /tmp/smoke-bundle.tar.gz 2>&1
+          ls -lh /tmp/smoke-bundle.tar.gz
+
+      - name: Run migrate verify on bundle
+        run: |
+          source .venv/bin/activate
+          hermes migrate verify --input /tmp/smoke-bundle.tar.gz 2>&1
+
+      - name: Run migrate import dry-run
+        run: |
+          source .venv/bin/activate
+          hermes migrate import --input /tmp/smoke-bundle.tar.gz --dry-run 2>&1
+
+      - name: Run migrate doctor
+        run: |
+          source .venv/bin/activate
+          hermes migrate doctor 2>&1
+
+      - name: Upload test logs on failure
+        if: failure() && steps.test.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: migrate-test-logs-${{ matrix.os }}
+          path: |
+            /tmp/hermes-test-home/**/*.log
+            tests/test_migrate_workflow/**/*.log
+          retention-days: 5
