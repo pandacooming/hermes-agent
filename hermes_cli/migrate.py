@@ -504,8 +504,9 @@ def _is_text_file(name: str) -> bool:
 
 def _remap_content(content: str, source_home: Path, target_home: Path) -> str:
     """Remap home directory paths in text content."""
-    source_str = str(source_home)
-    target_str = str(target_home)
+    # Normalize to forward slashes for cross-platform compatibility
+    source_str = str(source_home).replace("\\", "/")
+    target_str = str(target_home).replace("\\", "/")
     if source_str != target_str and source_str in content:
         return content.replace(source_str, target_str)
     return content
