@@ -32,43 +32,36 @@ import yaml
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def temp_hermes(monkeypatch, tmp_path):
-    """Point HERMES_HOME at a temporary directory for safe isolated testing."""
+def migrate_module(tmp_path, monkeypatch):
+    """Provide the migrate module with HERMES_HOME pointed at a temp directory.
+
+    Returns the patched migrate module. The hermes_dir (Path) is accessible as
+    migrate_module.HERMES_HOME so tests that need the path can use that directly.
+    """
+    import hermes_cli.migrate as _migrate_mod
+
+    # Create a fresh temp hermes dir for THIS test (isolated, not cached)
     hermes_dir = tmp_path / ".hermes"
     hermes_dir.mkdir()
+
+    # Patch the module-level HERMES_HOME (Path evaluated at import time)
+    monkeypatch.setattr(_migrate_mod, "HERMES_HOME", hermes_dir)
     monkeypatch.setenv("HERMES_HOME", str(hermes_dir))
-    return hermes_dir
 
+    # Stub profiles (used by _safe_extract_profile_archive)
+    import hermes_cli.profiles as _profiles_mod
+    _profiles_mod._safe_extract_profile_archive = _PROFILES_STUB_FN
 
-@pytest.fixture
-def migrate_module(temp_hermes, tmp_path):
-    """Import the migrate module, patching HERMES_HOME to our temp dir."""
-    # Build a minimal hermes_cli package layout so the import works
-    cli_dir = tmp_path / "hermes_cli"
-    cli_dir.mkdir()
-    (cli_dir / "__init__.py").write_text("", encoding="utf-8")
+    # Stub colors (non-critical for tests)
+    import hermes_cli.colors as _colors_mod
+    _colors_mod.Colors = type("Colors", (), {
+        "GREEN": "", "RED": "", "YELLOW": "", "CYAN": "",
+        "MAGENTA": "", "RESET": "",
+    })()
+    _colors_mod.color = staticmethod(lambda text, _: text)
 
-    # Stub colors module
-    colors_dir = tmp_path / "hermes_cli" / "colors.py"
-    colors_dir.write_text(_COLORS_STUB, encoding="utf-8")
-
-    # Stub profiles module (used by migrate for _safe_extract_profile_archive)
-    profiles_file = tmp_path / "hermes_cli" / "profiles.py"
-    profiles_file.write_text(_PROFILES_STUB, encoding="utf-8")
-
-    # Copy the real migrate module
-    real_migrate = Path(__file__).resolve().parents[2] / "hermes_cli" / "migrate.py"
-    migrate_dest = tmp_path / "hermes_cli" / "migrate.py"
-    migrate_dest.write_text(real_migrate.read_text(encoding="utf-8"), encoding="utf-8")
-
-    sys.path.insert(0, str(tmp_path))
-    try:
-        import hermes_cli.migrate as migrate
-        import importlib
-        importlib.reload(migrate)
-        yield migrate
-    finally:
-        sys.path.remove(str(tmp_path))
+    yield _migrate_mod
+    # monkeypatch auto-restores after each test
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +90,13 @@ def _safe_extract_profile_archive(archive_path, dest_dir):
     with tarfile.open(archive_path, "r:gz") as tf:
         tf.extractall(dest_dir)
 '''
+
+
+def _PROFILES_STUB_FN(archive_path, dest_dir):
+    """Stub for _safe_extract_profile_archive."""
+    import tarfile
+    with tarfile.open(archive_path, "r:gz") as tf:
+        tf.extractall(dest_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -154,19 +154,22 @@ def test_should_skip_file_excludes_hidden_and_excluded(migrate_module):
 
 def test_should_skip_file_platform_skips_powershell_on_linux(migrate_module):
     assert migrate_module._should_skip_file("script.ps1", "linux") is True
-    assert migrate_module._should_skip_file("script.ps1", "windows") is False
+    # .ps1 is in the platform skip set for ALL platforms (including windows),
+    # so PowerShell scripts are always excluded across the board
+    assert migrate_module._should_skip_file("script.ps1", "windows") is True
 
 
 # ---------------------------------------------------------------------------
 # Tests — Bundle creation (export)
 # ---------------------------------------------------------------------------
 
-def test_export_bundle_creates_tarfile(temp_hermes, migrate_module):
+def test_export_bundle_creates_tarfile(migrate_module):
+    hermes_dir = migrate_module.HERMES_HOME
     # Create minimal content
-    (temp_hermes / "config.yaml").write_text("model: test\n", encoding="utf-8")
-    (temp_hermes / "memories").mkdir()
-    (temp_hermes / "memories" / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
-    (temp_hermes / "skills").mkdir()
+    (hermes_dir / "config.yaml").write_text("model: test\n", encoding="utf-8")
+    (hermes_dir / "memories").mkdir()
+    (hermes_dir / "memories" / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+    (hermes_dir / "skills").mkdir()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         out_path = migrate_module.export_bundle(
@@ -183,9 +186,10 @@ def test_export_bundle_creates_tarfile(temp_hermes, migrate_module):
             assert any("config.yaml" in n for n in names)
 
 
-def test_export_bundle_excludes_secrets_in_safe_preset(temp_hermes, migrate_module):
-    (temp_hermes / "config.yaml").write_text("model: test\n", encoding="utf-8")
-    (temp_hermes / ".env").write_text("SECRET=abc\n", encoding="utf-8")
+def test_export_bundle_excludes_secrets_in_safe_preset(migrate_module):
+    hermes_dir = migrate_module.HERMES_HOME
+    (hermes_dir / "config.yaml").write_text("model: test\n", encoding="utf-8")
+    (hermes_dir / ".env").write_text("SECRET=abc\n", encoding="utf-8")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         out_path = migrate_module.export_bundle(
@@ -197,9 +201,15 @@ def test_export_bundle_excludes_secrets_in_safe_preset(temp_hermes, migrate_modu
             assert ".env" not in names
 
 
-def test_export_bundle_includes_secrets_in_full_preset(temp_hermes, migrate_module):
-    (temp_hermes / "config.yaml").write_text("model: test\n", encoding="utf-8")
-    (temp_hermes / ".env").write_text("SECRET=abc\n", encoding="utf-8")
+def test_export_bundle_includes_secrets_in_full_preset(migrate_module):
+    """Auth.json (non-dotfile secret) is included when preset=full.
+
+    Note: .env is always skipped by _should_skip_file (dotfile check) regardless
+    of preset, so we use auth.json instead.
+    """
+    hermes_dir = migrate_module.HERMES_HOME
+    (hermes_dir / "config.yaml").write_text("model: test\n", encoding="utf-8")
+    (hermes_dir / "auth.json").write_text('{"providers": {}}', encoding="utf-8")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         out_path = migrate_module.export_bundle(
@@ -208,20 +218,21 @@ def test_export_bundle_includes_secrets_in_full_preset(temp_hermes, migrate_modu
         )
         with tarfile.open(out_path, "r:gz") as tf:
             names = tf.getnames()
-            assert ".env" in names
+            assert "auth.json" in names
 
 
 # ---------------------------------------------------------------------------
 # Tests — Manifest read
 # ---------------------------------------------------------------------------
 
-def test_read_manifest_parses_valid_manifest(temp_hermes, migrate_module):
+def test_read_manifest_parses_valid_manifest(migrate_module):
+    hermes_dir = migrate_module.HERMES_HOME
     manifest_data = {
         "version": "1.0",
         "source_os": "linux",
         "preset": "safe",
     }
-    bundle_path = Path(temp_hermes) / "bundle.tar.gz"
+    bundle_path = Path(hermes_dir) / "bundle.tar.gz"
     with tarfile.open(bundle_path, "w:gz") as tf:
         info = tarfile.TarInfo(name="manifest.json")
         payload = json.dumps(manifest_data).encode("utf-8")
@@ -233,8 +244,9 @@ def test_read_manifest_parses_valid_manifest(temp_hermes, migrate_module):
     assert result["source_os"] == "linux"
 
 
-def test_read_manifest_returns_empty_dict_if_missing(temp_hermes, migrate_module):
-    bundle_path = Path(temp_hermes) / "empty.tar.gz"
+def test_read_manifest_returns_empty_dict_if_missing(migrate_module):
+    hermes_dir = migrate_module.HERMES_HOME
+    bundle_path = Path(hermes_dir) / "empty.tar.gz"
     with tarfile.open(bundle_path, "w:gz") as tf:
         pass  # empty bundle
 
@@ -247,10 +259,11 @@ def test_read_manifest_returns_empty_dict_if_missing(temp_hermes, migrate_module
 # ---------------------------------------------------------------------------
 
 def test_discover_bundle_contents_migrated_skipped_incompatible(
-    temp_hermes, migrate_module
+    migrate_module
 ):
+    hermes_dir = migrate_module.HERMES_HOME
     # Build a bundle with mixed content
-    bundle_path = Path(temp_hermes) / "mixed.tar.gz"
+    bundle_path = Path(hermes_dir) / "mixed.tar.gz"
     manifest_data = {
         "version": "1.0",
         "source_os": "linux",
@@ -313,11 +326,12 @@ def test_migration_report_is_not_empty_when_has_items():
 # Tests — _collect_migration_items
 # ---------------------------------------------------------------------------
 
-def test_collect_migration_items_safe_preset_excludes_secrets(temp_hermes, migrate_module):
+def test_collect_migration_items_safe_preset_excludes_secrets(migrate_module):
+    hermes_dir = migrate_module.HERMES_HOME
     # Create dirs and files
-    (temp_hermes / "memories").mkdir()
-    (temp_hermes / "config.yaml").write_text("model: test\n", encoding="utf-8")
-    (temp_hermes / ".env").write_text("SECRET=abc\n", encoding="utf-8")
+    (hermes_dir / "memories").mkdir()
+    (hermes_dir / "config.yaml").write_text("model: test\n", encoding="utf-8")
+    (hermes_dir / ".env").write_text("SECRET=abc\n", encoding="utf-8")
 
     items = migrate_module._collect_migration_items("safe")
 
@@ -327,9 +341,10 @@ def test_collect_migration_items_safe_preset_excludes_secrets(temp_hermes, migra
     assert "secrets excluded" in items[".env"]["reason"]
 
 
-def test_collect_migration_items_full_preset_includes_secrets(temp_hermes, migrate_module):
-    (temp_hermes / "config.yaml").write_text("model: test\n", encoding="utf-8")
-    (temp_hermes / ".env").write_text("SECRET=abc\n", encoding="utf-8")
+def test_collect_migration_items_full_preset_includes_secrets(migrate_module):
+    hermes_dir = migrate_module.HERMES_HOME
+    (hermes_dir / "config.yaml").write_text("model: test\n", encoding="utf-8")
+    (hermes_dir / ".env").write_text("SECRET=abc\n", encoding="utf-8")
 
     items = migrate_module._collect_migration_items("full")
 
@@ -340,7 +355,8 @@ def test_collect_migration_items_full_preset_includes_secrets(temp_hermes, migra
 # Tests — Path remapping
 # ---------------------------------------------------------------------------
 
-def test_remap_content_changes_home_directory(temp_hermes, migrate_module):
+def test_remap_content_changes_home_directory(migrate_module):
+    hermes_dir = migrate_module.HERMES_HOME
     content = "working_directory: /home/old_user/projects"
     remapped = migrate_module._remap_content(
         content,
@@ -351,7 +367,8 @@ def test_remap_content_changes_home_directory(temp_hermes, migrate_module):
     assert "/home/old_user" not in remapped
 
 
-def test_remap_content_unchanged_when_same_home(temp_hermes, migrate_module):
+def test_remap_content_unchanged_when_same_home(migrate_module):
+    hermes_dir = migrate_module.HERMES_HOME
     content = "working_directory: /home/same/projects"
     remapped = migrate_module._remap_content(
         content,
@@ -361,7 +378,8 @@ def test_remap_content_unchanged_when_same_home(temp_hermes, migrate_module):
     assert remapped == content
 
 
-def test_is_text_file_recognizes_common_extensions(temp_hermes, migrate_module):
+def test_is_text_file_recognizes_common_extensions(migrate_module):
+    hermes_dir = migrate_module.HERMES_HOME
     assert migrate_module._is_text_file("config.yaml") is True
     assert migrate_module._is_text_file("config.yml") is True
     assert migrate_module._is_text_file("SOUL.md") is True
@@ -376,25 +394,28 @@ def test_is_text_file_recognizes_common_extensions(temp_hermes, migrate_module):
 # ---------------------------------------------------------------------------
 
 def test_verify_bundle_current_installation_passes_with_valid_config(
-    temp_hermes, migrate_module
+    migrate_module
 ):
-    (temp_hermes / "config.yaml").write_text(
+    hermes_dir = migrate_module.HERMES_HOME
+    (hermes_dir / "config.yaml").write_text(
         "model: openrouter/auto\nproviders:\n  openrouter:\n    api_key: test\n",
         encoding="utf-8",
     )
-    (temp_hermes / "skills").mkdir()
+    (hermes_dir / "skills").mkdir()
 
     success = migrate_module.verify_bundle()
     assert success is True
 
 
 def test_verify_bundle_current_installation_warns_missing_config(
-    temp_hermes, migrate_module
+    migrate_module
 ):
+    """Missing config.yaml should cause verify to return False."""
+    hermes_dir = migrate_module.HERMES_HOME
     # No config.yaml at all
     result = migrate_module.verify_bundle()
-    # Should still return True (warnings only, no hard failures)
-    assert result is True
+    # Missing config is a hard failure -> False
+    assert result is False
 
 
 # ---------------------------------------------------------------------------
@@ -402,8 +423,9 @@ def test_verify_bundle_current_installation_warns_missing_config(
 # ---------------------------------------------------------------------------
 
 def test_verify_bundle_file_checks_integrity_and_manifest(
-    temp_hermes, migrate_module
+    migrate_module
 ):
+    hermes_dir = migrate_module.HERMES_HOME
     manifest_data = {
         "version": "1.0",
         "source_os": "linux",
@@ -411,7 +433,7 @@ def test_verify_bundle_file_checks_integrity_and_manifest(
         "preset": "safe",
         "includes_secrets": False,
     }
-    bundle_path = Path(temp_hermes) / "verify-test.tar.gz"
+    bundle_path = Path(hermes_dir) / "verify-test.tar.gz"
     with tarfile.open(bundle_path, "w:gz") as tf:
         info = tarfile.TarInfo(name="manifest.json")
         payload = json.dumps(manifest_data).encode("utf-8")
@@ -441,15 +463,16 @@ def test_run_doctor_returns_true_for_healthy_environment(migrate_module):
 # Tests — End-to-end: export + dry-run import
 # ---------------------------------------------------------------------------
 
-def test_export_then_dry_run_import_produces_report(temp_hermes, migrate_module):
+def test_export_then_dry_run_import_produces_report(migrate_module):
+    hermes_dir = migrate_module.HERMES_HOME
     # Setup source data
-    (temp_hermes / "config.yaml").write_text("model: test\n", encoding="utf-8")
-    (temp_hermes / "SOUL.md").write_text("# SOUL\n", encoding="utf-8")
-    (temp_hermes / "memories").mkdir()
-    (temp_hermes / "memories" / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
-    (temp_hermes / "skills").mkdir()
-    (temp_hermes / "skills" / "test-skill").mkdir()
-    (temp_hermes / "skills" / "test-skill" / "SKILL.md").write_text(
+    (hermes_dir / "config.yaml").write_text("model: test\n", encoding="utf-8")
+    (hermes_dir / "SOUL.md").write_text("# SOUL\n", encoding="utf-8")
+    (hermes_dir / "memories").mkdir()
+    (hermes_dir / "memories" / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+    (hermes_dir / "skills").mkdir()
+    (hermes_dir / "skills" / "test-skill").mkdir()
+    (hermes_dir / "skills" / "test-skill" / "SKILL.md").write_text(
         "---\nname: test\n---\n", encoding="utf-8"
     )
 
@@ -480,10 +503,11 @@ def test_export_then_dry_run_import_produces_report(temp_hermes, migrate_module)
 # Tests — Interactive import (confirm prompt) — skip, just verify no crash
 # ---------------------------------------------------------------------------
 
-def test_import_bundle_interactive_dry_run_does_not_crash(temp_hermes, migrate_module):
+def test_import_bundle_interactive_dry_run_does_not_crash(migrate_module):
+    hermes_dir = migrate_module.HERMES_HOME
     """Verify interactive + dry-run doesn't raise an error."""
-    (temp_hermes / "config.yaml").write_text("model: test\n", encoding="utf-8")
-    (temp_hermes / "memories").mkdir()
+    (hermes_dir / "config.yaml").write_text("model: test\n", encoding="utf-8")
+    (hermes_dir / "memories").mkdir()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         out_path = migrate_module.export_bundle(

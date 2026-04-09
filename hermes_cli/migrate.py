@@ -211,6 +211,8 @@ def export_bundle(output_path: Optional[str], preset: str = "safe") -> Path:
                             tf.add(str(full_path), arcname=arcname)
                             migrated_count += 1
                 else:
+                    if _should_skip_file(rel_path, source_platform["os"]):
+                        continue
                     tf.add(str(src), arcname=rel_path)
                     migrated_count += 1
             except (OSError, IOError):
