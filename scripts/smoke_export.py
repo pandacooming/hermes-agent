@@ -26,11 +26,14 @@ def main():
     result = subprocess.run(
         [sys.executable, "-m", "hermes", "migrate", "export", "--output", str(bundle)],
         check=False,
+        capture_output=True,
         cwd=str(hermes_home),
     )
     if result.returncode != 0:
-        print(result.stdout.decode("utf-8", errors="replace"))
-        print(result.stderr.decode("utf-8", errors="replace"))
+        if result.stdout:
+            print(result.stdout.decode("utf-8", errors="replace"))
+        if result.stderr:
+            print(result.stderr.decode("utf-8", errors="replace"))
         raise SystemExit(result.returncode)
     print(f"Bundle created at {bundle}")
 
