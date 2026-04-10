@@ -52,7 +52,7 @@ class TestOfferOpenclawMigration:
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
-        config_path.write_text("agent:\n  max_turns: 90\n")
+        config_path.write_text("agent:\n  max_turns: 300\n")
 
         # Build a fake migration module
         fake_mod = ModuleType("openclaw_to_hermes")

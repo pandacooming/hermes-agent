@@ -85,7 +85,7 @@ run_agent.py, cli.py, batch_runner.py, environments/
 class AIAgent:
     def __init__(self,
         model: str = "anthropic/claude-opus-4.6",
-        max_iterations: int = 90,
+        max_iterations: int = 300,
         enabled_toolsets: list = None,
         disabled_toolsets: list = None,
         quiet_mode: bool = False,
