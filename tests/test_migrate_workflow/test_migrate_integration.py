@@ -637,3 +637,408 @@ class TestDoctor:
 
         result = run_doctor()
         assert result is True
+
+
+# ============================================================================
+# Task 3 completion: missing single-direction tests
+# ============================================================================
+
+
+class TestImportExistingFiles:
+    """Import handles existing files by backing them up before overwriting."""
+
+    def test_import_overwrites_existing_file(self, tmp_path):
+        """Existing file is overwritten with bundle content (old version backed up)."""
+        from hermes_cli.migrate import export_bundle
+
+        hermes = tmp_path / ".hermes"
+        (hermes / "config.yaml").write_text("model: test\n", encoding="utf-8")
+        (hermes / "SOUL.md").write_text("# Old Soul\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            out = Path(out_dir) / "bundle.tar.gz"
+            export_bundle(output_path=str(out), preset="safe")
+
+            # Modify file before re-importing
+            (hermes / "config.yaml").write_text("modified\n", encoding="utf-8")
+            result = _run_import_cli(str(out), "safe", str(hermes))
+
+        assert result.returncode == 0, f"import failed: {result.stderr}"
+        assert (hermes / "config.yaml").read_text(encoding="utf-8") == "model: test\n"
+        backup_dirs = list(hermes.glob(".hermes.bak*"))
+        assert len(backup_dirs) == 1
+
+    def test_import_preserves_unbundled_files(self, tmp_path):
+        """Files that exist on disk but are NOT in the bundle are left alone."""
+        from hermes_cli.migrate import export_bundle
+
+        hermes = tmp_path / ".hermes"
+        (hermes / "config.yaml").write_text("model: test\n", encoding="utf-8")
+        (hermes / "local-only.txt").write_text("not in bundle\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            out = Path(out_dir) / "bundle.tar.gz"
+            export_bundle(output_path=str(out), preset="safe")
+            result = _run_import_cli(str(out), "safe", str(hermes))
+
+        assert result.returncode == 0
+        assert (hermes / "local-only.txt").exists()
+        assert (hermes / "local-only.txt").read_text(encoding="utf-8") == "not in bundle\n"
+
+
+class TestImportProfilesAndSessions:
+    """Profiles and sessions directory import."""
+
+    def test_import_profiles_subdirectory_contents(self, tmp_path):
+        """Profiles subdirectory files are extracted correctly."""
+        from hermes_cli.migrate import export_bundle
+
+        hermes = tmp_path / ".hermes"
+        (hermes / "config.yaml").write_text("model: test\n", encoding="utf-8")
+        profiles = hermes / "profiles"
+        profiles.mkdir()
+        coder = profiles / "coder"
+        coder.mkdir()
+        (coder / "config.yaml").write_text("model: coder-model\n", encoding="utf-8")
+        (coder / "SOUL.md").write_text("# Coder Soul\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            out = Path(out_dir) / "bundle.tar.gz"
+            export_bundle(output_path=str(out), preset="safe")
+            result = _run_import_cli(str(out), "safe", str(hermes))
+
+        assert result.returncode == 0, f"import failed: {result.stderr}"
+        assert (hermes / "profiles" / "coder" / "config.yaml").read_text(encoding="utf-8") == "model: coder-model\n"
+        assert (hermes / "profiles" / "coder" / "SOUL.md").exists()
+
+    def test_import_sessions_files(self, tmp_path):
+        """Session files are imported correctly."""
+        from hermes_cli.migrate import export_bundle
+
+        hermes = tmp_path / ".hermes"
+        (hermes / "config.yaml").write_text("model: test\n", encoding="utf-8")
+        sessions = hermes / "sessions"
+        sessions.mkdir()
+        (sessions / "session-abc.json").write_text('{"id": "abc", "messages": []}', encoding="utf-8")
+        (sessions / "session-xyz.json").write_text('{"id": "xyz", "messages": [{"role": "user"}]}', encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            out = Path(out_dir) / "bundle.tar.gz"
+            export_bundle(output_path=str(out), preset="safe")
+            result = _run_import_cli(str(out), "safe", str(hermes))
+
+        assert result.returncode == 0, f"import failed: {result.stderr}"
+        content = (hermes / "sessions" / "session-abc.json").read_text(encoding="utf-8")
+        assert '"id": "abc"' in content
+
+
+class TestPathRemappingCoverage:
+    """Additional path remapping for docker_volumes and external_dirs."""
+
+    def _inject_source_home(self, bundle_path: Path, out_dir: Path, source_home: str) -> Path:
+        """Patch a bundle's manifest to set a specific source_home."""
+        patched = out_dir / "patched.tar.gz"
+        with tarfile.open(bundle_path, "r:gz") as src, tarfile.open(patched, "w:gz") as dst:
+            for member in src.getmembers():
+                if member.name == "manifest.json":
+                    new_m = json.dumps({
+                        "version": "1.0", "preset": "safe", "source_os": "linux",
+                        "source_home": source_home,
+                        "includes_secrets": False,
+                        "bundle_created_at": "2026-01-01T00:00:00Z",
+                    }).encode("utf-8")
+                    info = tarfile.TarInfo(name="manifest.json")
+                    info.size = len(new_m)
+                    dst.addfile(info, BytesIO(new_m))
+                else:
+                    dst.addfile(member, src.extractfile(member))
+        return patched
+
+    def test_import_remaps_docker_volumes(self, tmp_path):
+        """docker_volumes paths in config.yaml are remapped."""
+        from hermes_cli.migrate import export_bundle
+
+        hermes = tmp_path / ".hermes"
+        (hermes / "config.yaml").write_text(
+            "model: test\n"
+            "terminal:\n"
+            "  docker_volumes:\n"
+            "    - /home/alice/data:/container/data\n"
+            "    - /home/alice/cache:/container/cache\n",
+            encoding="utf-8",
+        )
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            out = Path(out_dir) / "bundle.tar.gz"
+            export_bundle(output_path=str(out), preset="safe")
+            patched = self._inject_source_home(out, Path(out_dir), "/home/alice")
+            result = _run_import_cli(str(patched), "safe", str(hermes))
+
+        assert result.returncode == 0, f"import failed: {result.stderr}"
+        config = (hermes / "config.yaml").read_text(encoding="utf-8")
+        assert "/home/alice" not in config
+        assert "/container/data" in config
+
+    def test_import_remaps_external_dirs(self, tmp_path):
+        """external_dirs paths in config.yaml are remapped."""
+        from hermes_cli.migrate import export_bundle
+
+        hermes = tmp_path / ".hermes"
+        (hermes / "config.yaml").write_text(
+            "model: test\nexternal_dirs:\n  - /home/alice/projects\n  - /home/alice/dotfiles\n",
+            encoding="utf-8",
+        )
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            out = Path(out_dir) / "bundle.tar.gz"
+            export_bundle(output_path=str(out), preset="safe")
+            patched = self._inject_source_home(out, Path(out_dir), "/home/alice")
+            result = _run_import_cli(str(patched), "safe", str(hermes))
+
+        assert result.returncode == 0, f"import failed: {result.stderr}"
+        config = (hermes / "config.yaml").read_text(encoding="utf-8")
+        assert "/home/alice" not in config
+
+    def test_import_remaps_deeply_nested_memories(self, tmp_path):
+        """Deeply nested memories files get path remapped too."""
+        from hermes_cli.migrate import export_bundle
+
+        hermes = tmp_path / ".hermes"
+        (hermes / "config.yaml").write_text("model: test\n", encoding="utf-8")
+        memories = hermes / "memories"
+        memories.mkdir()
+        deep = memories / "projects" / "myapp" / "docs"
+        deep.mkdir(parents=True)
+        (deep / "ref.md").write_text("See /home/alice/projects/myapp/README\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            out = Path(out_dir) / "bundle.tar.gz"
+            export_bundle(output_path=str(out), preset="safe")
+            patched = self._inject_source_home(out, Path(out_dir), "/home/alice")
+            result = _run_import_cli(str(patched), "safe", str(hermes))
+
+        assert result.returncode == 0
+        ref = (hermes / "memories" / "projects" / "myapp" / "docs" / "ref.md").read_text(encoding="utf-8")
+        assert "/home/alice" not in ref
+
+
+class TestSafePresetSecretExclusion:
+    """Additional safe preset exclusion edge cases."""
+
+    def test_export_safe_excludes_nested_dotenv_in_memories(self, tmp_path):
+        """safe preset: .env nested inside memories/ is not in the bundle."""
+        from hermes_cli.migrate import export_bundle
+
+        hermes = tmp_path / ".hermes"
+        (hermes / "config.yaml").write_text("model: test\n", encoding="utf-8")
+        memories = hermes / "memories"
+        memories.mkdir()
+        (memories / "notes.md").write_text("# Notes\n", encoding="utf-8")
+        (memories / ".env").write_text("SECRET=inside_memories\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            out = Path(out_dir) / "bundle.tar.gz"
+            export_bundle(output_path=str(out), preset="safe")
+            with tarfile.open(out, "r:gz") as tf:
+                names = tf.getnames()
+
+        assert ".env" not in names
+        assert "memories/.env" not in names
+        assert "memories/notes.md" in names
+
+    def test_export_safe_excludes_nested_dotenv_in_skills(self, tmp_path):
+        """safe preset: .env nested inside skills/ is not in the bundle."""
+        from hermes_cli.migrate import export_bundle
+
+        hermes = tmp_path / ".hermes"
+        (hermes / "config.yaml").write_text("model: test\n", encoding="utf-8")
+        skills = hermes / "skills"
+        skills.mkdir()
+        skill_dir = skills / "my-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("---\nname: my-skill\n---\n", encoding="utf-8")
+        (skill_dir / ".env").write_text("INTERNAL=key\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            out = Path(out_dir) / "bundle.tar.gz"
+            export_bundle(output_path=str(out), preset="safe")
+            with tarfile.open(out, "r:gz") as tf:
+                names = tf.getnames()
+
+        assert not any(".env" in n for n in names)
+
+
+# ============================================================================
+# Task 4: End-to-end round-trip tests — export → import → verify
+# ============================================================================
+
+
+class TestRoundTrip:
+    """Full export → import round-trip tests."""
+
+    def test_roundtrip_config_and_memories(self, tmp_path):
+        """Export then import preserves config.yaml and memories content exactly."""
+        from hermes_cli.migrate import export_bundle
+
+        hermes = tmp_path / ".hermes"
+        (hermes / "config.yaml").write_text(
+            "model: openrouter/奥特曼\nproviders:\n  openrouter:\n    api_key: sk-test\n",
+            encoding="utf-8",
+        )
+        (hermes / "SOUL.md").write_text("# 自定义灵魂\n", encoding="utf-8")
+        memories = hermes / "memories"
+        memories.mkdir()
+        (memories / "idea.md").write_text("# 新想法\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            out = Path(out_dir) / "bundle.tar.gz"
+            export_bundle(output_path=str(out), preset="safe")
+
+            import shutil
+            if (hermes / "memories").exists():
+                shutil.rmtree(hermes / "memories")
+            if (hermes / "SOUL.md").exists():
+                (hermes / "SOUL.md").unlink()
+
+            result = _run_import_cli(str(out), "safe", str(hermes))
+            assert result.returncode == 0, f"import failed: {result.stderr}"
+
+        cfg = (hermes / "config.yaml").read_text(encoding="utf-8")
+        assert "openrouter/奥特曼" in cfg
+        assert (hermes / "SOUL.md").exists()
+        memories_content = (hermes / "memories" / "idea.md").read_text(encoding="utf-8")
+        assert "# 新想法" in memories_content
+
+    def test_roundtrip_skills_preserved(self, tmp_path):
+        """Skills with nested files survive a full export → import cycle."""
+        from hermes_cli.migrate import export_bundle
+
+        hermes = tmp_path / ".hermes"
+        (hermes / "config.yaml").write_text("model: test\n", encoding="utf-8")
+        skills = hermes / "skills"
+        skills.mkdir()
+        skill_dir = skills / "devops-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: devops-skill\ndescription: DevOps workflows\n---\n# DevOps\n",
+            encoding="utf-8",
+        )
+        refs = skill_dir / "references"
+        refs.mkdir()
+        (refs / "docker.md").write_text("# Docker Reference\n", encoding="utf-8")
+        (refs / "k8s.md").write_text("# Kubernetes Reference\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            out = Path(out_dir) / "bundle.tar.gz"
+            export_bundle(output_path=str(out), preset="safe")
+            import shutil
+            shutil.rmtree(skills)
+            result = _run_import_cli(str(out), "safe", str(hermes))
+            assert result.returncode == 0, f"import failed: {result.stderr}"
+
+        assert (hermes / "skills" / "devops-skill" / "references" / "docker.md").exists()
+        content = (hermes / "skills" / "devops-skill" / "references" / "docker.md").read_text(encoding="utf-8")
+        assert "Docker Reference" in content
+
+    def test_roundtrip_profiles(self, tmp_path):
+        """Multiple profiles survive export → import."""
+        from hermes_cli.migrate import export_bundle
+
+        hermes = tmp_path / ".hermes"
+        (hermes / "config.yaml").write_text("model: test\n", encoding="utf-8")
+        profiles = hermes / "profiles"
+        profiles.mkdir()
+        for name in ["coder", "researcher", "admin"]:
+            profile_dir = profiles / name
+            profile_dir.mkdir()
+            (profile_dir / "config.yaml").write_text(f"model: {name}-model\n", encoding="utf-8")
+            (profile_dir / "SOUL.md").write_text(f"# {name} soul\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            out = Path(out_dir) / "bundle.tar.gz"
+            export_bundle(output_path=str(out), preset="safe")
+            import shutil
+            shutil.rmtree(profiles)
+            result = _run_import_cli(str(out), "safe", str(hermes))
+            assert result.returncode == 0, f"import failed: {result.stderr}"
+
+        for name in ["coder", "researcher", "admin"]:
+            cfg = (hermes / "profiles" / name / "config.yaml").read_text(encoding="utf-8")
+            assert f"{name}-model" in cfg
+
+    def test_roundtrip_cross_machine_path_remap(self, tmp_path):
+        """Paths from a different machine are correctly remapped on import."""
+        from hermes_cli.migrate import export_bundle
+
+        hermes = tmp_path / ".hermes"
+        (hermes / "config.yaml").write_text(
+            "model: test\n"
+            "terminal:\n"
+            "  cwd: /home/alice/projects\n"
+            "external_dirs:\n"
+            "  - /home/alice/dotfiles\n",
+            encoding="utf-8",
+        )
+        memories = hermes / "memories"
+        memories.mkdir()
+        (memories / "note.md").write_text("Projects at /home/alice/projects\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            out = Path(out_dir) / "bundle.tar.gz"
+            export_bundle(output_path=str(out), preset="safe")
+
+            # Inject /home/alice as source_home
+            patched = Path(out_dir) / "patched.tar.gz"
+            with tarfile.open(out, "r:gz") as src, tarfile.open(patched, "w:gz") as dst:
+                for member in src.getmembers():
+                    if member.name == "manifest.json":
+                        new_m = json.dumps({
+                            "version": "1.0", "preset": "safe", "source_os": "linux",
+                            "source_home": "/home/alice",
+                            "includes_secrets": False,
+                            "bundle_created_at": "2026-01-01T00:00:00Z",
+                        }).encode("utf-8")
+                        info = tarfile.TarInfo(name="manifest.json")
+                        info.size = len(new_m)
+                        dst.addfile(info, BytesIO(new_m))
+                    else:
+                        dst.addfile(member, src.extractfile(member))
+
+            result = _run_import_cli(str(patched), "safe", str(hermes))
+            assert result.returncode == 0, f"import failed: {result.stderr}"
+
+        config = (hermes / "config.yaml").read_text(encoding="utf-8")
+        assert "/home/alice" not in config
+        memories_content = (hermes / "memories" / "note.md").read_text(encoding="utf-8")
+        assert "/home/alice" not in memories_content
+
+    def test_roundtrip_safe_preset_never_leaks_secrets(self, tmp_path):
+        """Even if .env exists on source, safe preset export never includes it."""
+        from hermes_cli.migrate import export_bundle
+
+        hermes = tmp_path / ".hermes"
+        (hermes / "config.yaml").write_text("model: test\n", encoding="utf-8")
+        (hermes / ".env").write_text("OPENAI_KEY=sk-super-secret-key\n", encoding="utf-8")
+        memories = hermes / "memories"
+        memories.mkdir()
+        (memories / "note.md").write_text("# Note\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            out = Path(out_dir) / "bundle.tar.gz"
+            export_bundle(output_path=str(out), preset="safe")
+
+            with tarfile.open(out, "r:gz") as tf:
+                names = tf.getnames()
+            assert ".env" not in names, "safe preset must not include .env in bundle"
+
+            if (hermes / ".env").exists():
+                (hermes / ".env").unlink()
+            import shutil
+            if (hermes / "memories").exists():
+                shutil.rmtree(hermes / "memories")
+
+            result = _run_import_cli(str(out), "safe", str(hermes))
+            assert result.returncode == 0
+
+        assert not (hermes / ".env").exists()
+        assert (hermes / "memories" / "note.md").exists()

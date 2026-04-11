@@ -208,6 +208,9 @@ def export_bundle(output_path: Optional[str], preset: str = "safe") -> Path:
                     for parent, dirs, files in os.walk(src):
                         dirs[:] = [d for d in dirs if not _should_skip_dir(d, source_platform["os"])]
                         for fname in files:
+                            # Secret files (nested at any depth) are excluded by safe preset
+                            if preset != "full" and fname in _SECRET_FILES:
+                                continue
                             if _should_skip_file(fname, source_platform["os"]):
                                 continue
                             full_path = Path(parent) / fname
