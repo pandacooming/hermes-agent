@@ -66,7 +66,7 @@ _SECRET_FILES = frozenset({".env", "auth.json"})
 _PLATFORM_SKIP = {
     "windows": {".ps1", ".bat", ".cmd"},
     "linux": {".ps1", ".bat", ".cmd"},
-    "macos": {".psms", ".bat", ".cmd"},
+    "macos": {".ps1", ".bat", ".cmd"},
     "wsl": {".ps1", ".bat", ".cmd"},
 }
 
@@ -277,7 +277,9 @@ def _should_skip_dir(name: str, os_type: str) -> bool:
 
 
 def _should_skip_file(name: str, os_type: str) -> bool:
-    if name.startswith("."):
+    # .env and auth.json are NOT skipped here — they are handled by
+    # _collect_migration_items which respects --preset flag.
+    if name.startswith(".") and name not in _SECRET_FILES:
         return True
     if name in _EXCLUDE_ALWAYS:
         return True

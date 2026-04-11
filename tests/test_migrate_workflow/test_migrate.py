@@ -151,8 +151,11 @@ def test_should_skip_dir_excludes_hidden_and_excluded(migrate_module):
 
 
 def test_should_skip_file_excludes_hidden_and_excluded(migrate_module):
-    assert migrate_module._should_skip_file(".env", "linux") is True
+    # .env and auth.json are NOT skipped here — handled by _collect_migration_items
+    assert migrate_module._should_skip_file(".env", "linux") is False
+    assert migrate_module._should_skip_file("auth.json", "linux") is False
     assert migrate_module._should_skip_file("state.db", "linux") is True
+    assert migrate_module._should_skip_file(".gitignore", "linux") is True
     assert migrate_module._should_skip_file("config.yaml", "linux") is False
     assert migrate_module._should_skip_file("skills.yaml", "linux") is False
 
@@ -194,7 +197,7 @@ def test_export_bundle_creates_tarfile(migrate_module):
 def test_export_bundle_excludes_secrets_in_safe_preset(migrate_module):
     hermes_dir = migrate_module.HERMES_HOME
     (hermes_dir / "config.yaml").write_text("model: test\n", encoding="utf-8")
-    (hermes_dir / ".env").write_text("SECRET=abc\n", encoding="utf-8")
+    (hermes_dir / ".env").write_text("SECRET=***", encoding="utf-8")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         out_path = migrate_module.export_bundle(
@@ -209,8 +212,8 @@ def test_export_bundle_excludes_secrets_in_safe_preset(migrate_module):
 def test_export_bundle_includes_secrets_in_full_preset(migrate_module):
     """Auth.json (non-dotfile secret) is included when preset=full.
 
-    Note: .env is always skipped by _should_skip_file (dotfile check) regardless
-    of preset, so we use auth.json instead.
+    Note: .env is handled by _collect_migration_items, not _should_skip_file.
+    We use auth.json here since it better isolates the preset=full behavior.
     """
     hermes_dir = migrate_module.HERMES_HOME
     (hermes_dir / "config.yaml").write_text("model: test\n", encoding="utf-8")
@@ -336,7 +339,7 @@ def test_collect_migration_items_safe_preset_excludes_secrets(migrate_module):
     # Create dirs and files
     (hermes_dir / "memories").mkdir()
     (hermes_dir / "config.yaml").write_text("model: test\n", encoding="utf-8")
-    (hermes_dir / ".env").write_text("SECRET=abc\n", encoding="utf-8")
+    (hermes_dir / ".env").write_text("SECRET=***", encoding="utf-8")
 
     items = migrate_module._collect_migration_items("safe")
 
@@ -349,7 +352,7 @@ def test_collect_migration_items_safe_preset_excludes_secrets(migrate_module):
 def test_collect_migration_items_full_preset_includes_secrets(migrate_module):
     hermes_dir = migrate_module.HERMES_HOME
     (hermes_dir / "config.yaml").write_text("model: test\n", encoding="utf-8")
-    (hermes_dir / ".env").write_text("SECRET=abc\n", encoding="utf-8")
+    (hermes_dir / ".env").write_text("SECRET=***", encoding="utf-8")
 
     items = migrate_module._collect_migration_items("full")
 
