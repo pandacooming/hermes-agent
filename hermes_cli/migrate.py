@@ -199,8 +199,13 @@ def export_bundle(output_path: Optional[str], preset: str = "safe") -> Path:
             if not src.exists():
                 continue
 
+<<<<<<< HEAD
             # Respect _collect_migration_items skip decisions (preset-based secrets)
             if item_info.get("status") == "skipped":
+=======
+            # Respect per-item status from _collect_migration_items (e.g. secrets skipped in safe preset)
+            if item_info.get('status') == 'skipped':
+>>>>>>> f8f57ecb (fix(migrate): respect per-item status when exporting bundle)
                 continue
 
             try:
