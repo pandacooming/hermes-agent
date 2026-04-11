@@ -199,13 +199,8 @@ def export_bundle(output_path: Optional[str], preset: str = "safe") -> Path:
             if not src.exists():
                 continue
 
-<<<<<<< HEAD
             # Respect _collect_migration_items skip decisions (preset-based secrets)
             if item_info.get("status") == "skipped":
-=======
-            # Respect per-item status from _collect_migration_items (e.g. secrets skipped in safe preset)
-            if item_info.get('status') == 'skipped':
->>>>>>> f8f57ecb (fix(migrate): respect per-item status when exporting bundle)
                 continue
 
             try:
@@ -370,7 +365,7 @@ def import_bundle(
     _backup_conflicts(bundle_path)
 
     print(color("  Extracting bundle...", Colors.CYAN))
-    _extract_with_remap(bundle_path, source_home, target_home, report)
+    _extract_with_remap(bundle_path, source_home, target_home, report, preset)
 
     _remap_config_paths(source_home, target_home, manifest)
 
@@ -469,8 +464,13 @@ def _extract_with_remap(
     source_home: Path,
     target_home: Path,
     report: MigrationReport,
+    preset: str = "safe",
 ) -> None:
-    """Extract bundle with home path remapping and report population."""
+    """Extract bundle with home path remapping and report population.
+
+    Args:
+        preset: "safe" or "full". In safe mode, .env and auth.json are skipped.
+    """
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -478,10 +478,16 @@ def _extract_with_remap(
 
         _safe_extract_profile_archive(bundle_path, tmppath)
 
+        # Secret files excluded by safe preset — filter before extraction
+        secret_files = {".env", "auth.json"} if preset == "safe" else set()
+
         extracted_items = []
         for item in tmppath.iterdir():
             rel = item.name
             if rel == "manifest.json":
+                continue
+            if rel in secret_files:
+                report.skipped.append(f"{rel}  [secrets excluded in safe preset]")
                 continue
 
             dest = HERMES_HOME / rel
@@ -500,6 +506,8 @@ def _extract_with_remap(
                     dest_sub = dest / rel_sub
                     if src_sub.is_file():
                         dest_sub.parent.mkdir(parents=True, exist_ok=True)
+                        if src_sub.name in secret_files:
+                            continue
                         if _is_text_file(src_sub.name):
                             file_content = src_sub.read_text(encoding="utf-8", errors="replace")
                             remapped = _remap_content(file_content, source_home, target_home)
