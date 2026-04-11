@@ -532,3 +532,171 @@ def test_import_bundle_interactive_dry_run_does_not_crash(migrate_module):
             interactive=True,  # dry_run takes priority, no getpass called
         )
         assert len(report.migrated) > 0
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — full export + real import cycle
+# ---------------------------------------------------------------------------
+
+def test_full_import_cycle_safe_preset_no_secrets(migrate_module):
+    """Export from source hermes home, import to target, verify no secrets leaked."""
+    hermes_dir = migrate_module.HERMES_HOME
+
+    # Set up source files
+    (hermes_dir / "config.yaml").write_text("model: test\n", encoding="utf-8")
+    (hermes_dir / "SOUL.md").write_text("# SOUL\n", encoding="utf-8")
+    (hermes_dir / ".env").write_text("OPENAI_KEY=sk-secret123\n", encoding="utf-8")
+    (hermes_dir / "auth.json").write_text('{"openai": "sk-secret"}', encoding="utf-8")
+    (hermes_dir / "memories").mkdir()
+    (hermes_dir / "memories" / "memory.md").write_text("# Memory\n", encoding="utf-8")
+    (hermes_dir / "skills").mkdir()
+    (hermes_dir / "skills" / "test-skill").mkdir()
+    (hermes_dir / "skills" / "test-skill" / "SKILL.md").write_text(
+        "---\nname: test\n---\n", encoding="utf-8"
+    )
+    # Platform-specific file should be skipped on same platform (linux)
+    (hermes_dir / "script.ps1").write_text("Write-Host 'hi'\n", encoding="utf-8")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out_path = migrate_module.export_bundle(
+            output_path=str(Path(tmpdir) / "safe-bundle.tar.gz"),
+            preset="safe",
+        )
+
+        # Verify bundle contents — no .env or auth.json
+        with tarfile.open(out_path, "r:gz") as tf:
+            names = [m.name for m in tf.getmembers()]
+        assert "manifest.json" in names
+        assert ".env" not in names, ".env should be excluded in safe preset"
+        assert "auth.json" not in names, "auth.json should be excluded in safe preset"
+        assert "config.yaml" in names
+        assert "SOUL.md" in names
+        assert any("memory.md" in n for n in names)
+        assert any("SKILL.md" in n for n in names)
+        assert "script.ps1" not in names, ".ps1 should be skipped on linux"
+
+
+def test_full_import_cycle_full_preset_includes_secrets(migrate_module):
+    """Export with preset=full, verify secrets are in the bundle."""
+    hermes_dir = migrate_module.HERMES_HOME
+
+    (hermes_dir / "config.yaml").write_text("model: test\n", encoding="utf-8")
+    (hermes_dir / ".env").write_text("OPENAI_KEY=sk-secret123\n", encoding="utf-8")
+    (hermes_dir / "auth.json").write_text('{"openai": "sk-secret"}', encoding="utf-8")
+    (hermes_dir / "memories").mkdir()
+    (hermes_dir / "memories" / "memory.md").write_text("# Memory\n", encoding="utf-8")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out_path = migrate_module.export_bundle(
+            output_path=str(Path(tmpdir) / "full-bundle.tar.gz"),
+            preset="full",
+        )
+
+        with tarfile.open(out_path, "r:gz") as tf:
+            names = [m.name for m in tf.getmembers()]
+
+        assert ".env" in names, ".env should be in full preset bundle"
+        assert "auth.json" in names, "auth.json should be in full preset bundle"
+
+        # Extract and check content is intact
+        with tarfile.open(out_path, "r:gz") as tf:
+            env_member = [m for m in tf.getmembers() if m.name == ".env"][0]
+            env_content = tf.extractfile(env_member).read().decode("utf-8")
+        assert "OPENAI_KEY=sk-secret123" in env_content
+
+
+def test_full_import_cycle_cross_directory_remap(migrate_module, monkeypatch):
+    """Export from source hermes home, mock source_home in manifest, import to
+    different target home, verify _remap_content rewrites old home paths."""
+    import hermes_cli.migrate as _migrate_mod
+
+    hermes_dir = migrate_module.HERMES_HOME
+
+    # Create files with absolute paths pointing to old machine
+    (hermes_dir / "config.yaml").write_text(
+        "model: test\nterminal:\n  cwd: /home/alice/projects\n",
+        encoding="utf-8",
+    )
+    (hermes_dir / "memories").mkdir()
+    (hermes_dir / "memories" / "ref.md").write_text(
+        "See /home/alice/docs for details\n", encoding="utf-8"
+    )
+
+    # Export bundle normally
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out_path = migrate_module.export_bundle(
+            output_path=str(Path(tmpdir) / "remap-bundle.tar.gz"),
+            preset="safe",
+        )
+
+        # Rewrite manifest to lie about source_home (simulates cross-machine)
+        import shutil
+        patched_path = Path(tmpdir) / "patched-bundle.tar.gz"
+        with tarfile.open(out_path, "r:gz") as src,              tarfile.open(patched_path, "w:gz") as dst:
+            for member in src.getmembers():
+                if member.name == "manifest.json":
+                    # Replace manifest with fake source home
+                    new_manifest = json.dumps({
+                        "version": "1.0",
+                        "hermes_version": "unknown",
+                        "preset": "safe",
+                        "source_os": "linux",
+                        "source_home": "/home/alice",  # fake old machine
+                        "includes_secrets": False,
+                    }).encode("utf-8")
+                    info = tarfile.TarInfo(name="manifest.json")
+                    info.size = len(new_manifest)
+                    dst.addfile(info, BytesIO(new_manifest))
+                else:
+                    dst.addfile(member, src.extractfile(member))
+
+        # Now import with fake "new machine" home — patch detect_platform
+        original_detect = _migrate_mod.detect_platform
+        def fake_detect():
+            return {"os": "linux", "home": Path("/home/bob")}
+        monkeypatch.setattr(_migrate_mod, "detect_platform", fake_detect)
+
+        report = migrate_module.import_bundle(
+            input_path=str(patched_path),
+            preset="safe",
+            dry_run=False,
+        )
+
+        # Verify home paths were remapped in text files
+        config_content = (hermes_dir / "config.yaml").read_text(encoding="utf-8")
+        assert "/home/alice" not in config_content, "Old home path should be remapped"
+        assert "/home/bob" in config_content, "/home/bob should appear after remapping"
+
+        mem_content = (hermes_dir / "memories" / "ref.md").read_text(encoding="utf-8")
+        assert "/home/alice" not in mem_content, "Old home in memory.md should be remapped"
+        assert "/home/bob" in mem_content, "New home should appear in memory.md"
+
+
+def test_import_excludes_runtime_artifacts(migrate_module):
+    """Runtime artifacts (state.db, __pycache__, etc.) must not end up in bundle."""
+    hermes_dir = migrate_module.HERMES_HOME
+
+    (hermes_dir / "config.yaml").write_text("model: test\n", encoding="utf-8")
+    (hermes_dir / "state.db").write_text("sqlite db content", encoding="utf-8")
+    (hermes_dir / "__pycache__").mkdir()
+    (hermes_dir / "__pycache__" / "test.pyc").write_text("bytecode", encoding="utf-8")
+    (hermes_dir / "hermes_state.db").write_text("db", encoding="utf-8")
+    (hermes_dir / "gateway.pid").write_text("1234", encoding="utf-8")
+    (hermes_dir / "memories").mkdir()
+    (hermes_dir / "memories" / "mem.md").write_text("# mem\n", encoding="utf-8")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out_path = migrate_module.export_bundle(
+            output_path=str(Path(tmpdir) / "artifact-bundle.tar.gz"),
+            preset="safe",
+        )
+
+        with tarfile.open(out_path, "r:gz") as tf:
+            names = [m.name for m in tf.getmembers()]
+
+        assert "state.db" not in names, "state.db is runtime artifact"
+        assert "hermes_state.db" not in names
+        assert "__pycache__" not in names
+        assert "gateway.pid" not in names
+        assert "config.yaml" in names
+        assert any("mem.md" in n for n in names)

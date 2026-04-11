@@ -488,10 +488,23 @@ def _extract_with_remap(
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_text(remapped_content, encoding="utf-8")
             elif item.is_dir():
-                if dest.exists():
-                    shutil.copytree(item, dest, dirs_exist_ok=True)
-                else:
-                    shutil.copytree(item, dest)
+                # Recursively copy directory, remapping text file contents
+                # (shutil.copytree skips perms issues, rglob handles nesting)
+                for src_sub in item.rglob("*"):
+                    rel_sub = src_sub.relative_to(item)
+                    dest_sub = dest / rel_sub
+                    if src_sub.is_file():
+                        dest_sub.parent.mkdir(parents=True, exist_ok=True)
+                        if _is_text_file(src_sub.name):
+                            file_content = src_sub.read_text(encoding="utf-8", errors="replace")
+                            remapped = _remap_content(file_content, source_home, target_home)
+                            dest_sub.write_text(remapped, encoding="utf-8")
+                        else:
+                            shutil.copy2(src_sub, dest_sub)
+                    else:
+                        dest_sub.mkdir(parents=True, exist_ok=True)
+                # Ensure dest dir itself exists (for empty dirs)
+                dest.mkdir(parents=True, exist_ok=True)
             else:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(item, dest)
