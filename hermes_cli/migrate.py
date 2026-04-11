@@ -199,6 +199,10 @@ def export_bundle(output_path: Optional[str], preset: str = "safe") -> Path:
             if not src.exists():
                 continue
 
+            # Respect _collect_migration_items skip decisions (preset-based secrets)
+            if item_info.get("status") == "skipped":
+                continue
+
             try:
                 if src.is_dir():
                     for parent, dirs, files in os.walk(src):
