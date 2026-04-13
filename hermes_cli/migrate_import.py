@@ -33,7 +33,6 @@ from hermes_cli.profiles import _safe_extract_profile_archive
 
 def import_bundle(
     input_path: str,
-    preset: str = "safe",
     dry_run: bool = False,
     interactive: bool = False,
 ) -> MigrationReport:
@@ -41,7 +40,6 @@ def import_bundle(
 
     Args:
         input_path: Path to .tar.gz bundle
-        preset: "safe" or "full"
         dry_run: If True, show what would be done without applying
         interactive: If True, run guided interactive mode
 
@@ -53,6 +51,7 @@ def import_bundle(
         raise FileNotFoundError(f"Bundle not found: {bundle_path}")
 
     manifest = _read_manifest(bundle_path)
+    preset = manifest.get("preset", "safe")
     source_platform = {
         "os": manifest.get("source_os", "unknown"),
         "home": Path(manifest.get("source_home", "~")),
@@ -88,7 +87,7 @@ def import_bundle(
         return report
 
     if interactive:
-        _run_interactive(bundle_path, source_home, target_home, manifest, target_platform, report, preset=preset)
+        _run_interactive(bundle_path, source_home, target_home, manifest, target_platform, report)
         return report
 
     # Auto-import path
@@ -98,7 +97,7 @@ def import_bundle(
     _backup_conflicts(bundle_path)
 
     print(color("  Extracting bundle...", Colors.CYAN))
-    _extract_with_remap(bundle_path, source_home, target_home, report, preset)
+    _extract_with_remap(bundle_path, source_home, target_home, report)
 
     _remap_config_paths(source_home, target_home, manifest)
 
@@ -210,7 +209,6 @@ def _extract_with_remap(
     source_home: Path,
     target_home: Path,
     report: MigrationReport,
-    preset: str = "safe",
 ) -> None:
     """Extract bundle with home path remapping and report population."""
     import tempfile
@@ -590,7 +588,6 @@ def _run_interactive(
     manifest: dict,
     target_platform: dict,
     report: MigrationReport,
-    preset: str = "safe",
 ) -> None:
     """Guided interactive migration flow."""
     print(color("\n  Interactive mode — follow the prompts\n", Colors.CYAN))
@@ -650,7 +647,7 @@ def _run_interactive(
     _backup_conflicts(bundle_path)
 
     print(color("  Extracting bundle...", Colors.CYAN))
-    _extract_with_remap(bundle_path, source_home, target_home, report, preset=preset)
+    _extract_with_remap(bundle_path, source_home, target_home, report)
 
     _remap_config_paths(source_home, target_home, manifest)
 
