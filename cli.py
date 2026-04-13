@@ -2420,8 +2420,8 @@ class HermesCLI:
         # suppress them during streaming too — unless show_reasoning is
         # enabled, in which case we route the inner content to the
         # reasoning display box instead of discarding it.
-        _OPEN_TAGS = ("<REASONING_SCRATCHPAD>", "<think>", "<reasoning>", "<THINKING>", "<thinking>")
-        _CLOSE_TAGS = ("</REASONING_SCRATCHPAD>", "</think>", "</reasoning>", "</THINKING>", "</thinking>")
+        _OPEN_TAGS = ("<REASONING_SCRATCHPAD>", "<think>", "<reasoning>", "<THINKING>", "<thinking>", "<thought>")
+        _CLOSE_TAGS = ("</REASONING_SCRATCHPAD>", "</think>", "</reasoning>", "</THINKING>", "</thinking>", "</thought>")
 
         # Append to a pre-filter buffer first
         self._stream_prefilt = getattr(self, "_stream_prefilt", "") + text
@@ -2734,6 +2734,22 @@ class HermesCLI:
         runtime_model = runtime.get("model")
         if runtime_model and isinstance(runtime_model, str):
             self.model = runtime_model
+
+        # If model is still empty (e.g. user ran `hermes auth add openai-codex`
+        # without `hermes model`), fall back to the provider's first catalog
+        # model so the API call doesn't fail with "model must be non-empty".
+        if not self.model and resolved_provider:
+            try:
+                from hermes_cli.models import get_default_model_for_provider
+                _default = get_default_model_for_provider(resolved_provider)
+                if _default:
+                    self.model = _default
+                    logger.info(
+                        "No model configured — defaulting to %s for provider %s",
+                        _default, resolved_provider,
+                    )
+            except Exception:
+                pass
 
         # Normalize model for the resolved provider (e.g. swap non-Codex
         # models when provider is openai-codex).  Fixes #651.
@@ -5375,6 +5391,8 @@ class HermesCLI:
             self._show_usage()
         elif canonical == "insights":
             self._show_insights(cmd_original)
+        elif canonical == "debug":
+            self._handle_debug_command()
         elif canonical == "paste":
             self._handle_paste_command()
         elif canonical == "image":
@@ -6288,6 +6306,14 @@ class HermesCLI:
 
         except Exception as e:
             print(f"  ❌ Compression failed: {e}")
+
+    def _handle_debug_command(self):
+        """Handle /debug — upload debug report + logs and print paste URLs."""
+        from hermes_cli.debug import run_debug_share
+        from types import SimpleNamespace
+
+        args = SimpleNamespace(lines=200, expire=7, local=False)
+        run_debug_share(args)
 
     def _show_usage(self):
         """Show rate limits (if available) and session token usage."""
@@ -7601,8 +7627,10 @@ class HermesCLI:
                         "error": _summary,
                     }
 
-            # Start agent in background thread
-            agent_thread = threading.Thread(target=run_agent)
+            # Start agent in background thread (daemon so it cannot keep the
+            # process alive when the user closes the terminal tab — SIGHUP
+            # exits the main thread and daemon threads are reaped automatically).
+            agent_thread = threading.Thread(target=run_agent, daemon=True)
             agent_thread.start()
 
             # Monitor the dedicated interrupt queue while the agent runs.
@@ -9553,16 +9581,36 @@ class HermesCLI:
             pass  # Signal handlers may fail in restricted environments
         
         # Install a custom asyncio exception handler that suppresses the
-        # "Event loop is closed" RuntimeError from httpx transport cleanup.
-        # This is defense-in-depth — the primary fix is neuter_async_httpx_del
-        # which disables __del__ entirely, but older clients or SDK upgrades
-        # could bypass it.
+        # "Event loop is closed" RuntimeError from httpx transport cleanup
+        # and the "0 is not registered" KeyError from broken stdin (#6393).
+        # The RuntimeError fix is defense-in-depth — the primary fix is
+        # neuter_async_httpx_del which disables __del__ entirely.  The
+        # KeyError fix handles macOS + uv-managed Python environments where
+        # fd 0 is not reliably available to the asyncio selector.
         def _suppress_closed_loop_errors(loop, context):
             exc = context.get("exception")
             if isinstance(exc, RuntimeError) and "Event loop is closed" in str(exc):
                 return  # silently suppress
+            if isinstance(exc, KeyError) and "is not registered" in str(exc):
+                return  # suppress selector registration failures (#6393)
             # Fall back to default handler for everything else
             loop.default_exception_handler(context)
+
+        # Validate stdin before launching prompt_toolkit — on macOS with
+        # uv-managed Python, fd 0 can be invalid or unregisterable with the
+        # asyncio selector, causing "KeyError: '0 is not registered'" (#6393).
+        try:
+            import os as _os
+            _os.fstat(0)
+        except OSError:
+            print(
+                "Error: stdin (fd 0) is not available.\n"
+                "This can happen with certain Python installations (e.g. uv-managed cPython on macOS).\n"
+                "Try reinstalling Python via pyenv or Homebrew, then re-run: hermes setup"
+            )
+            _run_cleanup()
+            self._print_exit_summary()
+            return
 
         # Run the application with patch_stdout for proper output handling
         try:
@@ -9577,8 +9625,28 @@ class HermesCLI:
                 app.run()
         except (EOFError, KeyboardInterrupt, BrokenPipeError):
             pass
+        except (KeyError, OSError) as _stdin_err:
+            # Catch selector registration failures from broken stdin (#6393).
+            # This is the fallback for cases that slip past the fstat() guard.
+            if "is not registered" in str(_stdin_err) or "Bad file descriptor" in str(_stdin_err):
+                print(
+                    f"\nError: stdin is not usable ({_stdin_err}).\n"
+                    "This can happen with certain Python installations (e.g. uv-managed cPython on macOS).\n"
+                    "Try reinstalling Python via pyenv or Homebrew, then re-run: hermes setup"
+                )
+            else:
+                raise
         finally:
             self._should_exit = True
+            # Interrupt the agent immediately so its daemon thread stops making
+            # API calls and exits promptly (agent_thread is daemon, so the
+            # process will exit once the main thread finishes, but interrupting
+            # avoids wasted API calls and lets run_conversation clean up).
+            if self.agent and getattr(self, '_agent_running', False):
+                try:
+                    self.agent.interrupt()
+                except Exception:
+                    pass
             # Flush memories before exit (only for substantial conversations)
             if self.agent and self.conversation_history:
                 try:

@@ -2502,8 +2502,11 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
         print()
         override = ""
     if override and base_url_env:
-        save_env_value(base_url_env, override)
-        effective_base = override
+        if not override.startswith(("http://", "https://")):
+            print("  Invalid URL — must start with http:// or https://. Keeping current value.")
+        else:
+            save_env_value(base_url_env, override)
+            effective_base = override
 
     # Model selection — resolution order:
     #   1. models.dev registry (cached, filtered for agentic/tool-capable models)
@@ -2832,6 +2835,12 @@ def cmd_dump(args):
     """Dump setup summary for support/debugging."""
     from hermes_cli.dump import run_dump
     run_dump(args)
+
+
+def cmd_debug(args):
+    """Debug tools (share report, etc.)."""
+    from hermes_cli.debug import run_debug
+    run_debug(args)
 
 
 def cmd_config(args):
@@ -3939,6 +3948,26 @@ def cmd_update(args):
         print()
         print("✓ Update complete!")
         
+        # Write exit code *before* the gateway restart attempt.
+        # When running as ``hermes update --gateway`` (spawned by the gateway's
+        # /update command), this process lives inside the gateway's systemd
+        # cgroup.  ``systemctl restart hermes-gateway`` kills everything in the
+        # cgroup (KillMode=mixed → SIGKILL to remaining processes), including
+        # us and the wrapping bash shell.  The shell never reaches its
+        # ``printf $status > .update_exit_code`` epilogue, so the exit-code
+        # marker file is never created.  The new gateway's update watcher then
+        # polls for 30 minutes and sends a spurious timeout message.
+        #
+        # Writing the marker here — after git pull + pip install succeed but
+        # before we attempt the restart — ensures the new gateway sees it
+        # regardless of how we die.
+        if gateway_mode:
+            _exit_code_path = get_hermes_home() / ".update_exit_code"
+            try:
+                _exit_code_path.write_text("0")
+            except OSError:
+                pass
+        
         # Auto-restart ALL gateways after update.
         # The code update (git pull) is shared across all profiles, so every
         # running gateway needs restarting to pick up the new code.
@@ -4223,18 +4252,24 @@ def cmd_profile(args):
                             print(f'  Add to your shell config (~/.bashrc or ~/.zshrc):')
                             print(f'    export PATH="$HOME/.local/bin:$PATH"')
 
+            # Profile dir for display
+            try:
+                profile_dir_display = "~/" + str(profile_dir.relative_to(Path.home()))
+            except ValueError:
+                profile_dir_display = str(profile_dir)
+
             # Next steps
             print(f"\nNext steps:")
             print(f"  {name} setup              Configure API keys and model")
             print(f"  {name} chat               Start chatting")
             print(f"  {name} gateway start      Start the messaging gateway")
             if clone or clone_all:
-                try:
-                    profile_dir_display = "~/" + str(profile_dir.relative_to(Path.home()))
-                except ValueError:
-                    profile_dir_display = str(profile_dir)
                 print(f"\n  Edit {profile_dir_display}/.env for different API keys")
                 print(f"  Edit {profile_dir_display}/SOUL.md for different personality")
+            else:
+                print(f"\n  ⚠ This profile has no API keys yet. Run '{name} setup' first,")
+                print(f"    or it will inherit keys from your shell environment.")
+                print(f"  Edit {profile_dir_display}/SOUL.md to customize personality")
             print()
 
         except (ValueError, FileExistsError, FileNotFoundError) as e:
@@ -4416,6 +4451,7 @@ Examples:
     hermes logs -f                Follow agent.log in real time
     hermes logs errors            View errors.log
     hermes logs --since 1h        Lines from the last hour
+    hermes debug share             Upload debug report for support
     hermes update                 Update to latest version
 
 For more help on a command:
@@ -4944,6 +4980,43 @@ For more help on a command:
         help="Show redacted API key prefixes (first/last 4 chars) instead of just set/not set"
     )
     dump_parser.set_defaults(func=cmd_dump)
+
+    # =========================================================================
+    # debug command
+    # =========================================================================
+    debug_parser = subparsers.add_parser(
+        "debug",
+        help="Debug tools — upload logs and system info for support",
+        description="Debug utilities for Hermes Agent. Use 'hermes debug share' to "
+                    "upload a debug report (system info + recent logs) to a paste "
+                    "service and get a shareable URL.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+Examples:
+    hermes debug share              Upload debug report and print URL
+    hermes debug share --lines 500  Include more log lines
+    hermes debug share --expire 30  Keep paste for 30 days
+    hermes debug share --local      Print report locally (no upload)
+""",
+    )
+    debug_sub = debug_parser.add_subparsers(dest="debug_command")
+    share_parser = debug_sub.add_parser(
+        "share",
+        help="Upload debug report to a paste service and print a shareable URL",
+    )
+    share_parser.add_argument(
+        "--lines", type=int, default=200,
+        help="Number of log lines to include per log file (default: 200)",
+    )
+    share_parser.add_argument(
+        "--expire", type=int, default=7,
+        help="Paste expiry in days (default: 7)",
+    )
+    share_parser.add_argument(
+        "--local", action="store_true",
+        help="Print the report locally instead of uploading",
+    )
+    debug_parser.set_defaults(func=cmd_debug)
 
     # =========================================================================
     # backup command
